@@ -2,3 +2,4 @@
 /static/
 /data*
 /tmp
+.env

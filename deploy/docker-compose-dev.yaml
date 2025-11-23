@@ -1,0 +1,248 @@
+#================================================================================================
+# Coroot Platform - Docker Compose Configuration
+# Version: 1.0.0
+# Observability Platform with Prometheus, ClickHouse, and Coroot Agents
+#================================================================================================
+#
+# USAGE:
+#   Development (all services):
+#     docker-compose --profile dev up -d
+#
+#   Production (core only):
+#     docker-compose up -d
+#
+#   With monitoring agents:
+#     docker-compose --profile agents up -d
+#
+#================================================================================================
+
+#================================================================================================
+# NETWORK SETUP
+#================================================================================================
+networks:
+  coroot_net:
+    name: coroot_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.160.0.0/16
+
+#================================================================================================
+# VOLUME SETUP
+#================================================================================================
+volumes:
+  # Core volumes
+  vol_prometheus_data:
+    driver: ${VOLUMES_DRIVER:-local}
+  vol_clickhouse_data:
+    driver: ${VOLUMES_DRIVER:-local}
+  vol_clickhouse_logs:
+    driver: ${VOLUMES_DRIVER:-local}
+  vol_coroot_data:
+    driver: ${VOLUMES_DRIVER:-local}
+  # Agent volumes
+  vol_node_agent_data:
+    driver: ${VOLUMES_DRIVER:-local}
+  vol_cluster_agent_data:
+    driver: ${VOLUMES_DRIVER:-local}
+  # Dev-Tools volumes
+  vol_portainer:
+    driver: ${VOLUMES_DRIVER:-local}
+
+#================================================================================================
+# SERVICES
+#================================================================================================
+services:
+  #==============================================================================================
+  # CORE SERVICES (Always Running)
+  #==============================================================================================
+
+  #----------------------------------------------------------------------------------------------
+  # COROOT - Main Observability Platform
+  #----------------------------------------------------------------------------------------------
+  coroot:
+    platform: linux/amd64
+    image: ghcr.io/coroot/coroot${LICENSE_KEY:+-ee}
+    container_name: ${CONTAINER_COROOT:-coroot_main}
+    restart: unless-stopped
+    pull_policy: always
+    user: root
+    ports:
+      - "${PORT_COROOT_HOST:-8080}:8080"
+    environment:
+      - TZ=${TZ:-UTC}
+      - LICENSE_KEY=${LICENSE_KEY:-}
+    volumes:
+      - vol_coroot_data:/data
+    command:
+      - '--data-dir=/data'
+      - '--bootstrap-prometheus-url=http://prometheus:9090'
+      - '--bootstrap-refresh-interval=15s'
+      - '--bootstrap-clickhouse-address=clickhouse:9000'
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    networks:
+      coroot_net:
+        ipv4_address: ${CONTAINER_IP_COROOT:-172.160.160.50}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://coroot:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  #----------------------------------------------------------------------------------------------
+  # PROMETHEUS - Metrics Collection & Storage
+  #----------------------------------------------------------------------------------------------
+  prometheus:
+    platform: linux/amd64
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v2.53.5}
+    container_name: ${CONTAINER_PROMETHEUS:-coroot_prometheus}
+    restart: unless-stopped
+    ports:
+      - "${PORT_PROMETHEUS_HOST:-9090}:9090"
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - vol_prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-remote-write-receiver'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}'
+    networks:
+      coroot_net:
+        ipv4_address: ${CONTAINER_IP_PROMETHEUS:-172.160.160.40}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://prometheus:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  #----------------------------------------------------------------------------------------------
+  # CLICKHOUSE - Time-Series Data Storage
+  #----------------------------------------------------------------------------------------------
+  clickhouse:
+    platform: linux/amd64
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-24.3}
+    container_name: ${CONTAINER_CLICKHOUSE:-coroot_clickhouse}
+    restart: unless-stopped
+    ports:
+      - "${PORT_CLICKHOUSE_HOST:-9001}:9000"
+      - "${PORT_CLICKHOUSE_HTTP_HOST:-8124}:8123"
+    environment:
+      - TZ=${TZ:-UTC}
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-coroot}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+    volumes:
+      - vol_clickhouse_data:/var/lib/clickhouse
+      - vol_clickhouse_logs:/var/log/clickhouse-server
+    networks:
+      coroot_net:
+        ipv4_address: ${CONTAINER_IP_CLICKHOUSE:-172.160.160.30}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query='SELECT 1' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  #==============================================================================================
+  # AGENT SERVICES (Profile: agents)
+  #==============================================================================================
+
+  #----------------------------------------------------------------------------------------------
+  # NODE AGENT - Host-level Monitoring
+  #----------------------------------------------------------------------------------------------
+  node-agent:
+    platform: linux/amd64
+    image: ghcr.io/coroot/coroot-node-agent:${NODE_AGENT_VERSION:-latest}
+    container_name: ${CONTAINER_NODE_AGENT:-coroot_node_agent}
+    restart: unless-stopped
+    pull_policy: always
+    privileged: true
+    pid: "host"
+    profiles:
+      - agents
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - /sys/kernel/tracing:/sys/kernel/tracing
+      - /sys/kernel/debug:/sys/kernel/debug
+      - /sys/fs/cgroup:/host/sys/fs/cgroup
+      - vol_node_agent_data:/data
+    command:
+      - '--collector-endpoint=http://coroot:8080'
+      - '--cgroupfs-root=/host/sys/fs/cgroup'
+      - '--wal-dir=/data'
+    depends_on:
+      coroot:
+        condition: service_healthy
+    networks:
+      coroot_net:
+        ipv4_address: ${CONTAINER_IP_NODE_AGENT:-172.160.160.60}
+
+  #----------------------------------------------------------------------------------------------
+  # CLUSTER AGENT - Kubernetes/Container Monitoring
+  #----------------------------------------------------------------------------------------------
+  cluster-agent:
+    platform: linux/amd64
+    image: ghcr.io/coroot/coroot-cluster-agent:${CLUSTER_AGENT_VERSION:-latest}
+    container_name: ${CONTAINER_CLUSTER_AGENT:-coroot_cluster_agent}
+    restart: unless-stopped
+    pull_policy: always
+    profiles:
+      - agents
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - vol_cluster_agent_data:/data
+    command:
+      - '--coroot-url=http://coroot:8080'
+      - '--metrics-scrape-interval=15s'
+      - '--metrics-wal-dir=/data'
+    depends_on:
+      coroot:
+        condition: service_healthy
+    networks:
+      coroot_net:
+        ipv4_address: ${CONTAINER_IP_CLUSTER_AGENT:-172.160.160.70}
+
+  #----------------------------------------------------------------------------------------------
+  # PORTAINER - Docker Container Management UI
+  #----------------------------------------------------------------------------------------------
+  portainer:
+    platform: linux/amd64
+    image: portainer/portainer-ce:${PORTAINER_VERSION:-latest}
+    container_name: ${CONTAINER_PORTAINER:-coroot_portainer}
+    restart: unless-stopped
+    ports:
+      - "${PORT_PORTAINER_HOST:-5212}:9000"
+      - "${PORT_PORTAINER_HTTPS_HOST:-9444}:9443"
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - vol_portainer:/data
+    networks:
+      coroot_net:
+        ipv4_address: ${CONTAINER_IP_PORTAINER:-172.160.160.5}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://portainer:9000/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
