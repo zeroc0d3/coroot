@@ -187,6 +187,8 @@ services:
     command:
       - '--collector-endpoint=http://coroot:8080'
       - '--cgroupfs-root=/host/sys/fs/cgroup'
+      - '--api-key=${API_KEYS}'
+      - '--scrape-interval=15s'
       - '--wal-dir=/data'
     depends_on:
       coroot:
