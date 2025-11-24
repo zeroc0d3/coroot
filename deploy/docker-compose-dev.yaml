@@ -214,6 +214,7 @@ services:
       - vol_cluster_agent_data:/data
     command:
       - '--coroot-url=http://coroot:8080'
+      - '--api-key=${API_KEYS}'
       - '--metrics-scrape-interval=15s'
       - '--metrics-wal-dir=/data'
     depends_on:
